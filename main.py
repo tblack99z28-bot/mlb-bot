@@ -24,6 +24,9 @@ def get_live(gamePk):
 def check_games():
     print("Checking games...")
 
+    if WEBHOOK:
+    send_alert("🔥 BOT IS WORKING")
+    
     schedule = get_schedule()
 
     for date in schedule.get("dates", []):
