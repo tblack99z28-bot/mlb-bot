@@ -7,7 +7,7 @@ WEBHOOK = os.getenv("DISCORD_WEBHOOK")
 
 alerted = set()
 ops_cache = {}
-team_cache = set()  # track which teams we've loaded
+team_cache = set()
 
 def send_alert(msg):
     if WEBHOOK:
@@ -35,7 +35,6 @@ def get_player_ops(player_id):
             ops = 0
         else:
             ops = float(splits[0]["stat"].get("ops", "0"))
-
     except:
         ops = 0
 
@@ -43,19 +42,16 @@ def get_player_ops(player_id):
     return ops
 
 def preload_team_ops(live_data, team, gamePk):
-    # only load once per team per game
     key = f"{gamePk}-{team}"
     if key in team_cache:
         return
 
     try:
         batting_order = live_data["liveData"]["boxscore"]["teams"][team]["battingOrder"]
-
         for player_id in batting_order:
             get_player_ops(player_id)
 
         team_cache.add(key)
-
     except:
         pass
 
@@ -64,8 +60,7 @@ def is_top_of_order_next(live_data, team):
         offense = live_data["liveData"]["linescore"]["offense"]
         batting_order = live_data["liveData"]["boxscore"]["teams"][team]["battingOrder"]
 
-        current = offense.get("batter", {})
-        current_id = current.get("id")
+        current_id = offense.get("batter", {}).get("id")
 
         if current_id not in batting_order:
             return False
@@ -74,7 +69,6 @@ def is_top_of_order_next(live_data, team):
         next_idx = (idx + 1) % len(batting_order)
 
         return (next_idx + 1) in [1, 2, 3]
-
     except:
         return False
 
@@ -84,8 +78,7 @@ def get_next_three_hitters(live_data, team):
         batting_order = live_data["liveData"]["boxscore"]["teams"][team]["battingOrder"]
         players = live_data["liveData"]["boxscore"]["teams"][team]["players"]
 
-        current = offense.get("batter", {})
-        current_id = current.get("id")
+        current_id = offense.get("batter", {}).get("id")
 
         if current_id not in batting_order:
             return [], []
@@ -104,10 +97,9 @@ def get_next_three_hitters(live_data, team):
             ops = ops_cache.get(player_id, 0)
 
             hitters.append(f"{name} ({ops:.3f})")
-            elite_flags.append(ops >= 0.850)
+            elite_flags.append(ops >= 0.800)  # slightly relaxed
 
         return hitters, elite_flags
-
     except:
         return [], []
 
@@ -121,38 +113,30 @@ def check_games():
             gamePk = game["gamePk"]
 
             live = get_live(gamePk)
-
             linescore = live["liveData"]["linescore"]
+
             inning = linescore.get("currentInning", 0)
+            outs = linescore.get("outs", 0)
 
             if inning < 4:
                 continue
 
-            # preload lineup stats (🔥 big optimization)
-            preload_team_ops(live, "home", gamePk)
-            preload_team_ops(live, "away", gamePk)
-
-            # only trigger at inning end
-            if not linescore.get("isInningBreak"):
+            # 🔥 Better inning-end detection
+            if outs != 0:
                 continue
 
             key = f"{gamePk}-inning-{inning}"
             if key in alerted:
                 continue
 
-            # check BOTH teams
+            preload_team_ops(live, "home", gamePk)
+            preload_team_ops(live, "away", gamePk)
+
             home_top = is_top_of_order_next(live, "home")
             away_top = is_top_of_order_next(live, "away")
 
-            if not (home_top and away_top):
-                continue
-
-            # hitters + elite check
-            away_hitters, away_elite = get_next_three_hitters(live, "away")
             home_hitters, home_elite = get_next_three_hitters(live, "home")
-
-            if not (any(away_elite) and any(home_elite)):
-                continue
+            away_hitters, away_elite = get_next_three_hitters(live, "away")
 
             home = game["teams"]["home"]["team"]["name"]
             away = game["teams"]["away"]["team"]["name"]
@@ -162,17 +146,35 @@ def check_games():
 
             total_runs = home_runs + away_runs
 
-            send_alert(
-                f"🚨 ELITE TOP OF ORDER SPOT 🚨\n"
-                f"{away} vs {home}\n"
-                f"End of {inning}\n\n"
-                f"Score: {away_runs} - {home_runs}\n"
-                f"Total Runs: {total_runs}\n\n"
-                f"{away} due up:\n" + "\n".join(away_hitters) + "\n\n"
-                f"{home} due up:\n" + "\n".join(home_hitters)
-            )
+            # ---------------- STRONG ALERT ----------------
+            if home_top and away_top and any(home_elite) and any(away_elite):
+                send_alert(
+                    f"🔥 STRONG SPOT 🔥\n"
+                    f"{away} vs {home}\n"
+                    f"End of {inning}\n\n"
+                    f"Score: {away_runs} - {home_runs}\n\n"
+                    f"{away} due up:\n" + "\n".join(away_hitters) + "\n\n"
+                    f"{home} due up:\n" + "\n".join(home_hitters)
+                )
 
-            alerted.add(key)
+                alerted.add(key)
+                continue
+
+            # ---------------- WEAK ALERT ----------------
+            if (home_top and any(home_elite)) or (away_top and any(away_elite)):
+
+                team_name = home if home_top else away
+                hitters = home_hitters if home_top else away_hitters
+
+                send_alert(
+                    f"⚡ WEAK SPOT ⚡\n"
+                    f"{away} vs {home}\n"
+                    f"End of {inning}\n\n"
+                    f"Score: {away_runs} - {home_runs}\n\n"
+                    f"{team_name} due up:\n" + "\n".join(hitters)
+                )
+
+                alerted.add(key)
 
 while True:
     try:
@@ -180,4 +182,4 @@ while True:
     except Exception as e:
         print("Error:", e)
 
-    time.sleep(60)
+    time.sleep(30)  # faster polling for better timing
